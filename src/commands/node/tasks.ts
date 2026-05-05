@@ -22,7 +22,7 @@ import {
 } from '../../core/constants.js';
 
 const localBuildPathFilter: (path: string | string[]) => boolean = (path: string | string[]): boolean => {
-  return !(path.includes('data/keys') || path.includes('data/config') || path.includes('build'));
+  return !(path.includes('data/keys') || path.includes('data/config'));
 };
 import {Templates} from '../../core/templates.js';
 import {
@@ -58,7 +58,6 @@ import type FindConfig from 'find-process';
 import type ProcessInfo from 'find-process';
 import * as helpers from '../../core/helpers.js';
 import {
-  addDebugOptions,
   addRootImageValues,
   createAndCopyBlockNodeJsonFileForConsensusNode,
   entityId,
@@ -132,6 +131,7 @@ import {Base64} from 'js-base64';
 import {SecretType} from '../../integration/kube/resources/secret/secret-type.js';
 import {InjectTokens} from '../../core/dependency-injection/inject-tokens.js';
 import {PathEx} from '../../business/utils/path-ex.js';
+import {helmValuesHelper} from '../../core/helm-values-helper.js';
 import {type GitClient} from '../../integration/git/git-client.js';
 import {type NodeDestroyConfigClass} from './config-interfaces/node-destroy-config-class.js';
 import {type NodeRefreshConfigClass} from './config-interfaces/node-refresh-config-class.js';
@@ -257,7 +257,7 @@ export class NodeCommandTasks {
 
     // bump field hedera.config.version or use the version passed in
     const fileBytes: Buffer = fs.readFileSync(
-      PathEx.joinWithRealPath(stagingDirectory, 'templates', 'application.properties'),
+      PathEx.joinWithRealPath(stagingDirectory, 'templates', constants.APPLICATION_PROPERTIES),
     );
     const lines: string[] = fileBytes.toString().split('\n');
     const newLines: string[] = [];
@@ -272,7 +272,7 @@ export class NodeCommandTasks {
         newLines.push(line);
       }
     }
-    fs.writeFileSync(PathEx.join(upgradeConfigDirectory, 'application.properties'), newLines.join('\n'));
+    fs.writeFileSync(PathEx.join(upgradeConfigDirectory, constants.APPLICATION_PROPERTIES), newLines.join('\n'));
 
     return await zipper.zip(
       PathEx.join(stagingDirectory, 'mock-upgrade'),
@@ -829,7 +829,10 @@ export class NodeCommandTasks {
             .getK8(context)
             .containers()
             .readByRef(containerReference)
-            .copyFrom(`${constants.HEDERA_HAPI_PATH}/data/config/application.properties`, templatesDirectory);
+            .copyFrom(
+              `${constants.HEDERA_HAPI_PATH}/data/config/${constants.APPLICATION_PROPERTIES}`,
+              templatesDirectory,
+            );
 
           context_.upgradeZipFile = await this._prepareUpgradeZip(config.stagingDir, config.upgradeVersion);
         }
@@ -1082,12 +1085,12 @@ export class NodeCommandTasks {
           await k8Container.copyFrom(`${keyDirectory}/${signedKeyFile.name}`, `${keysDir}`);
         }
 
-        const applicationPropertiesSourceDirectory: string = `${constants.HEDERA_HAPI_PATH}/data/upgrade/current/data/config/application.properties`;
+        const applicationPropertiesSourceDirectory: string = `${constants.HEDERA_HAPI_PATH}/data/upgrade/current/data/config/${constants.APPLICATION_PROPERTIES}`;
 
         await ((await k8Container.hasFile(applicationPropertiesSourceDirectory))
           ? k8Container.copyFrom(applicationPropertiesSourceDirectory, `${stagingDir}/templates`)
           : k8Container.copyFrom(
-              `${constants.HEDERA_HAPI_PATH}/data/upgrade/current/data/config/application.properties`,
+              `${constants.HEDERA_HAPI_PATH}/data/upgrade/current/data/config/${constants.APPLICATION_PROPERTIES}`,
               `${stagingDir}/templates`,
             ));
       },
@@ -1791,7 +1794,7 @@ export class NodeCommandTasks {
               const applicationPropertiesPath: string = PathEx.joinWithRealPath(
                 config.cacheDir,
                 'templates',
-                'application.properties',
+                constants.APPLICATION_PROPERTIES,
               );
 
               const consensusNodes: ConsensusNode[] = this.remoteConfig.getConsensusNodes();
@@ -2331,7 +2334,7 @@ export class NodeCommandTasks {
         if (!this.isDefaultFlagValue(flags.applicationProperties)) {
           this.profileManager.resourcesForNetworkUpgrade(
             'hedera.configMaps.applicationProperties',
-            'application.properties',
+            constants.APPLICATION_PROPERTIES,
             stagingDirectory,
             yamlRoot,
           );
@@ -2385,7 +2388,7 @@ export class NodeCommandTasks {
           }
 
           if (!this.isDefaultFlagValue(flags.applicationProperties)) {
-            const sourcePath: string = PathEx.join(stagingDirectory, 'templates', 'application.properties');
+            const sourcePath: string = PathEx.join(stagingDirectory, 'templates', constants.APPLICATION_PROPERTIES);
             const destinationPath: string = ConsensusNodePathTemplates.DATA_CONFIG;
 
             await container.copyTo(sourcePath, destinationPath);
@@ -3364,7 +3367,7 @@ export class NodeCommandTasks {
           ? PathEx.joinWithRealPath(config.stagingDir, 'config.txt')
           : undefined;
         const profileValuesFile: string = await this.profileManager.prepareValuesForNodeTransaction(
-          PathEx.joinWithRealPath(config.stagingDir, 'templates', 'application.properties'),
+          PathEx.joinWithRealPath(config.stagingDir, 'templates', constants.APPLICATION_PROPERTIES),
           configTxtPath,
         );
 
@@ -3383,19 +3386,67 @@ export class NodeCommandTasks {
             });
           }
         }
-        // Add Debug options
-        const consensusNode: ConsensusNode = consensusNodes.find(
-          (node): boolean => node.name === config.debugNodeAlias,
-        );
-        const clusterReference: string = consensusNode
-          ? consensusNode.cluster
-          : this.k8Factory.default().clusters().readCurrent();
 
-        valuesArgumentMap[clusterReference] = addDebugOptions(
-          valuesArgumentMap[clusterReference],
-          config.debugNodeAlias,
-          this.remoteConfig.configuration.state.wrapsEnabled ? 1 : 0,
-        );
+        // Generate extraEnv values file for wraps, debug, and custom environment variables
+        // This replaces the old --set extraEnv approach to prevent Helm replacement issues
+        const needsExtraEnvironment: boolean =
+          this.remoteConfig.configuration.state.wrapsEnabled || !!config.debugNodeAlias;
+
+        if (needsExtraEnvironment) {
+          for (const [clusterReference] of clusterReferences) {
+            // Collect extraEnv entries already present in the values files applied to this
+            // cluster so that the generated file can include them and avoid Helm array
+            // replacement silently dropping env vars set by user-provided values files.
+            // Always include the chart's own defaults file so default JAVA_OPTS/heap vars
+            // are preserved when no per-node override exists in the user-provided files.
+            const existingValuesFilePaths: string[] = [constants.SOLO_DEPLOYMENT_VALUES_FILE];
+            for (const filePath of helmValuesHelper.parseValuesFilePaths(valuesArgumentMap[clusterReference])) {
+              if (!existingValuesFilePaths.includes(filePath)) {
+                existingValuesFilePaths.push(filePath);
+              }
+            }
+
+            const clusterLocalNodeIndices: Record<NodeId, number> | undefined = clusterNodeIndexMap[clusterReference];
+            const indexedConsensusNodes: Array<ConsensusNode | undefined> = [];
+            const unindexedConsensusNodes: ConsensusNode[] = [];
+            for (const consensusNode of consensusNodes) {
+              const nodeIndex: number | undefined = clusterLocalNodeIndices?.[consensusNode.nodeId];
+              if (nodeIndex === undefined) {
+                unindexedConsensusNodes.push(consensusNode);
+                continue;
+              }
+              indexedConsensusNodes[nodeIndex] = consensusNode;
+            }
+            const clusterConsensusNodes: ConsensusNode[] = [
+              ...indexedConsensusNodes.filter((node): node is ConsensusNode => node !== undefined),
+              ...unindexedConsensusNodes,
+            ];
+
+            const extraEnvironmentValuesFile: string = helmValuesHelper.generateExtraEnvironmentValuesFile(
+              clusterConsensusNodes,
+              {
+                wrapsEnabled: this.remoteConfig.configuration.state.wrapsEnabled,
+                tss: this.soloConfig.tss,
+                debugNodeAlias: config.debugNodeAlias,
+                useJavaMainClass: false,
+                baseExtraEnvironmentVariables: helmValuesHelper.extractExtraEnvironmentFromValuesFiles(
+                  existingValuesFilePaths,
+                  clusterConsensusNodes,
+                ),
+              },
+              constants.SOLO_CACHE_DIR,
+            );
+            // Append the generated file after all existing --values entries but before
+            // any --set overrides so it wins in Helm's merge order without being overridden
+            // by subsequent --values files that could still replace the hedera.nodes array.
+            const existingArguments: string = valuesArgumentMap[clusterReference] ?? '';
+            const firstSetArgumentIndex: number = existingArguments.search(/\s--set(?:\s|=|-)/);
+            valuesArgumentMap[clusterReference] =
+              firstSetArgumentIndex === -1
+                ? `${existingArguments} --values "${extraEnvironmentValuesFile}"`
+                : `${existingArguments.slice(0, firstSetArgumentIndex)} --values "${extraEnvironmentValuesFile}"${existingArguments.slice(firstSetArgumentIndex)}`;
+          }
+        }
 
         const clusterReferencesList: ClusterReferenceName[] = [];
         for (const [clusterReference] of clusterReferences) {
@@ -3466,15 +3517,7 @@ export class NodeCommandTasks {
           versions.S6_NODE_IMAGE_VERSION,
         );
       }
-      if (this.remoteConfig.configuration.state.wrapsEnabled) {
-        valuesArgumentMap[clusterReference] +=
-          ` --set "hedera.nodes[${index}].root.extraEnv[0].name=TSS_LIB_WRAPS_ARTIFACTS_PATH"`;
-
-        const wraps: Wraps = this.soloConfig.tss.wraps;
-        const path: string = `${constants.HEDERA_HAPI_PATH}/${wraps.artifactsFolderName}`;
-
-        valuesArgumentMap[clusterReference] += ` --set "hedera.nodes[${index}].root.extraEnv[0].value=${path}"`;
-      }
+      // TSS wraps extraEnv is handled via generateExtraEnvironmentValuesFile()
     }
   }
 
@@ -3557,15 +3600,7 @@ export class NodeCommandTasks {
       }
     }
 
-    if (this.remoteConfig.configuration.state.wrapsEnabled) {
-      valuesArgumentMap[clusterReference] +=
-        ` --set "hedera.nodes[${index}].root.extraEnv[0].name=TSS_LIB_WRAPS_ARTIFACTS_PATH"`;
-
-      const wraps: Wraps = this.soloConfig.tss.wraps;
-      const path: string = `${constants.HEDERA_HAPI_PATH}/${wraps.artifactsFolderName}`;
-
-      valuesArgumentMap[clusterReference] += ` --set "hedera.nodes[${index}].root.extraEnv[0].value=${path}"`;
-    }
+    // TSS wraps extraEnv is handled via generateExtraEnvironmentValuesFile()
   }
 
   /**
@@ -3609,15 +3644,7 @@ export class NodeCommandTasks {
             versions.S6_NODE_IMAGE_VERSION,
           );
         }
-        if (this.remoteConfig.configuration.state.wrapsEnabled) {
-          valuesArgumentMap[clusterReference] +=
-            ` --set "hedera.nodes[${index}].root.extraEnv[0].name=TSS_LIB_WRAPS_ARTIFACTS_PATH"`;
-
-          const wraps: Wraps = this.soloConfig.tss.wraps;
-          const path: string = `${constants.HEDERA_HAPI_PATH}/${wraps.artifactsFolderName}`;
-
-          valuesArgumentMap[clusterReference] += ` --set "hedera.nodes[${index}].root.extraEnv[0].value=${path}"`;
-        }
+        // TSS wraps extraEnv is handled via generateExtraEnvironmentValuesFile()
 
         index++;
       }

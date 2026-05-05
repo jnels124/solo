@@ -31,6 +31,7 @@ export const NETWORK_LOAD_GENERATOR_CHART_VERSION: string =
   constants.getEnvironmentVariable('NETWORK_LOAD_GENERATOR_CHART_VERSION') || '0.8.0';
 
 export const MINIO_OPERATOR_VERSION: string = constants.getEnvironmentVariable('MINIO_OPERATOR_VERSION') || '7.1.1';
+export const METRICS_SERVER_VERSION: string = constants.getEnvironmentVariable('METRICS_SERVER_VERSION') || '';
 export const PROMETHEUS_STACK_VERSION: string =
   constants.getEnvironmentVariable('PROMETHEUS_STACK_VERSION') || '52.0.1';
 export const GRAFANA_AGENT_VERSION: string = constants.getEnvironmentVariable('GRAFANA_AGENT_VERSION') || '0.27.1';
@@ -73,7 +74,7 @@ export const LAST_HIERO_CONSENSUS_NODE_VERSION_NEED_CONFIG_TXT: string = 'v0.70.
 export const POST_HIERO_MIGRATION_MIRROR_NODE_VERSION: string = '0.130.0';
 export const MEMORY_ENHANCEMENTS_MIRROR_NODE_VERSION: string = '0.152.0';
 
-export const MINIMUM_HIERO_PLATFORM_VERSION_FOR_TSS: string = 'v0.72.0-0';
+export const MINIMUM_HIERO_PLATFORM_VERSION_FOR_TSS: string = 'v0.74.0-0';
 export const MINIMUM_BLOCK_NODE_CHART_VERSION_FOR_MIRROR_NODE_INTEGRATION: string = '0.29.0-0';
 export const MINIMUM_MIRROR_NODE_CHART_VERSION_FOR_MIRROR_NODE_INTEGRATION: string = '0.150.0-0';
 

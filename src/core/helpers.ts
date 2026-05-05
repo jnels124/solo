@@ -212,22 +212,6 @@ export function renameAndCopyFile(
 }
 
 /**
- * Add debug options to valuesArg used by helm chart
- * @param valuesArgument the valuesArg to update
- * @param debugNodeAlias the node ID to attach the debugger to
- * @param index the index of extraEnv to add the debug options to
- * @returns updated valuesArg
- */
-export function addDebugOptions(valuesArgument: string, debugNodeAlias: NodeAlias, index: number = 0): string {
-  if (debugNodeAlias) {
-    const nodeId: number = Templates.nodeIdFromNodeAlias(debugNodeAlias);
-    valuesArgument += ` --set "hedera.nodes[${nodeId}].root.extraEnv[${index}].name=JAVA_OPTS"`;
-    valuesArgument += String.raw` --set "hedera.nodes[${nodeId}].root.extraEnv[${index}].value=-agentlib:jdwp=transport=dt_socket\,server=y\,suspend=y\,address=*:${constants.JVM_DEBUG_PORT}"`;
-  }
-  return valuesArgument;
-}
-
-/**
  * Append root.image registry/repository/tag settings for a given node path to a Helm values argument string.
  * @param valuesArgument - existing values argument string (may be empty)
  * @param nodePath - base node path, e.g. `hedera.nodes[0]`
@@ -281,6 +265,28 @@ export function addSaveContextParser(context_: AnyListrContext): Record<string, 
   return exportedContext;
 }
 
+type AddLoadContext = AnyListrContext & {
+  config: NodeAddConfigClass;
+  signingCertDer: Uint8Array;
+  gossipEndpoints: ServiceEndpoint[];
+  grpcServiceEndpoints: ServiceEndpoint[];
+  adminKey: PrivateKey;
+  tlsCertHash: unknown;
+  upgradeZipHash: unknown;
+  newNode: unknown;
+};
+
+type AddLoadContextData = {
+  signingCertDer: string;
+  gossipEndpoints: string[];
+  grpcServiceEndpoints: string[];
+  adminKey: string;
+  newNode: {name: NodeAlias};
+  existingNodeAliases: NodeAliases;
+  tlsCertHash: unknown;
+  upgradeZipHash: unknown;
+};
+
 /**
  * Initializes objects in the context from a provided string
  * Contains fields needed for adding a new node through separate commands
@@ -288,9 +294,11 @@ export function addSaveContextParser(context_: AnyListrContext): Record<string, 
  * @param ctxData - data in string format
  * @returns file writable object
  */
-export function addLoadContextParser(context_: any, contextData: any): void {
-  const config: any = context_.config;
-  context_.signingCertDer = new Uint8Array(contextData.signingCertDer.split(','));
+export function addLoadContextParser(context_: AddLoadContext, contextData: AddLoadContextData): void {
+  const config: NodeAddConfigClass = context_.config;
+  context_.signingCertDer = new Uint8Array(
+    contextData.signingCertDer.split(',').map((value: string): number => Number.parseInt(value, 10)),
+  );
   context_.gossipEndpoints = prepareEndpoints(
     context_.config.endpointType,
     contextData.gossipEndpoints,
@@ -307,7 +315,11 @@ export function addLoadContextParser(context_: any, contextData: any): void {
   config.allNodeAliases = [...config.existingNodeAliases, contextData.newNode.name];
   config.newNodeAliases = [contextData.newNode.name];
 
-  const fieldsToImport: string[] = ['tlsCertHash', 'upgradeZipHash', 'newNode'];
+  const fieldsToImport: Array<'tlsCertHash' | 'upgradeZipHash' | 'newNode'> = [
+    'tlsCertHash',
+    'upgradeZipHash',
+    'newNode',
+  ];
 
   for (const property of fieldsToImport) {
     context_[property] = contextData[property];
@@ -839,7 +851,7 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
     `mv ${targetDirectory}/${sourceFilename} ${targetDirectory}/${constants.BLOCK_NODES_JSON_FILE}`,
   );
 
-  const applicationPropertiesFilePath: string = `${constants.HEDERA_HAPI_PATH}/data/config/application.properties`;
+  const applicationPropertiesFilePath: string = `${constants.HEDERA_HAPI_PATH}/data/config/${constants.APPLICATION_PROPERTIES}`;
 
   const applicationPropertiesData: string = await container.execContainer(`cat ${applicationPropertiesFilePath}`);
 
@@ -863,8 +875,7 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
   }
 
   await k8.configMaps().update(namespace, 'network-node-data-config-cm', {
-    ['applicationProperties']: lines.join('\n'),
-    ['application.properties']: lines.join('\n'),
+    [constants.APPLICATION_PROPERTIES]: lines.join('\n'),
   });
 
   const configName: string = `network-${nodeAlias}-data-config-cm`;
@@ -876,7 +887,10 @@ export async function createAndCopyBlockNodeJsonFileForConsensusNode(
 
   logger.debug(`Copied block-nodes configuration to consensus node ${consensusNode.name}`);
 
-  const updatedApplicationPropertiesFilePath: string = PathEx.join(constants.SOLO_CACHE_DIR, 'application.properties');
+  const updatedApplicationPropertiesFilePath: string = PathEx.join(
+    constants.SOLO_CACHE_DIR,
+    constants.APPLICATION_PROPERTIES,
+  );
 
   fs.writeFileSync(updatedApplicationPropertiesFilePath, lines.join('\n'));
   await container.copyTo(updatedApplicationPropertiesFilePath, targetDirectory);
